@@ -101,7 +101,7 @@ Data science and AI development workspace combining Claude Code with JupyterLab.
 ### Step 1: Deploy CloudFormation Stack
 
 1. Navigate to AWS CloudFormation console in your desired region
-2. Create a new stack using `infrastructure/coder_deployment.yaml`
+2. Create a new stack using [`infrastructure/coder_deployment.yaml`](/aws-coder-ai-builder-gitops/infrastructure/coder_deployment.yaml)
 3. Configure the following parameters:
 
 **Required Parameters:**
