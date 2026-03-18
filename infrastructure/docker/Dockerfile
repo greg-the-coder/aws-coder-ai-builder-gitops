@@ -7,12 +7,13 @@ FROM public.ecr.aws/amazonlinux/amazonlinux:2023
 ARG HELM_VERSION=3.16.4
 ARG CODER_VERSION=2.30.2
 
-# System packages needed by the pre_build and post_build scripts
-RUN dnf install -y \
+# The AL2023 minimal image ships curl-minimal which conflicts with
+# the full curl package. Swap it out first, then install everything.
+RUN dnf swap -y curl-minimal curl \
+    && dnf install -y \
     python3.12 \
     python3.12-pip \
     git \
-    curl \
     unzip \
     jq \
     tar \
