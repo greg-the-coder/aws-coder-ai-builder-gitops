@@ -4,16 +4,18 @@ Pre-baked container image for the Coder EKS deployment CodeBuild job.
 
 ## What's included
 
-| Tool       | Source                                      |
-|------------|---------------------------------------------|
-| AWS CLI v2 | awscli-exe-linux-x86_64                     |
-| kubectl    | kubernetes-release (stable)                 |
-| eksctl     | weaveworks/eksctl (latest)                  |
-| Helm       | helm v3.16.4 (configurable via build arg)   |
-| Terraform  | hashicorp/terraform (latest)                |
-| Coder CLI  | coder.com/install.sh (configurable)         |
-| Python 3.12| Amazon Linux 2023 package                   |
-| git, jq    | Amazon Linux 2023 packages                  |
+Base image: `aws/codebuild/amazonlinux2-x86_64-standard:5.0` (same as the original BuildProject)
+
+| Tool       | Install method (mirrors pre_build)                |
+|------------|---------------------------------------------------|
+| AWS CLI    | `pip3 install --upgrade --user awscli`            |
+| kubectl    | kubernetes-release/stable.txt (latest)            |
+| eksctl     | weaveworks/eksctl latest tarball                  |
+| Helm       | helm v3.16.4 tarball (configurable via build arg) |
+| Coder CLI  | coder.com/install.sh --method standalone          |
+| Terraform  | hashicorp/terraform latest zip from GitHub API    |
+
+Python 3.12, git, curl, unzip, jq are already in the base image.
 
 ## Build args
 
@@ -23,8 +25,6 @@ Override at build time to pin versions:
 docker build \
   --build-arg HELM_VERSION=3.16.4 \
   --build-arg CODER_VERSION=2.30.2 \
-  --build-arg KUBECTL_VERSION=v1.32.0 \
-  --build-arg TERRAFORM_VERSION=1.10.3 \
   -t coder-codebuild:latest .
 ```
 

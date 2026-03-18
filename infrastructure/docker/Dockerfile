@@ -1,70 +1,52 @@
-FROM public.ecr.aws/amazonlinux/amazonlinux:2023
+# Match the exact base image used by the original BuildProject
+FROM aws/codebuild/amazonlinux2-x86_64-standard:5.0
 
 ARG HELM_VERSION=3.16.4
 ARG CODER_VERSION=2.30.2
-ARG KUBECTL_VERSION=latest
-ARG TERRAFORM_VERSION=latest
 
-# Core packages
-RUN dnf install -y \
-    python3.12 \
-    python3.12-pip \
-    git \
-    curl \
-    unzip \
-    jq \
-    tar \
-    gzip \
-    shadow-utils \
-    && dnf clean all
+# -------------------------------------------------------
+# Mirror the pre_build commands from coder_deployment.yaml
+# -------------------------------------------------------
 
-# AWS CLI v2
-RUN curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o awscliv2.zip \
-    && unzip -q awscliv2.zip \
-    && ./aws/install \
-    && rm -rf awscliv2.zip aws
+# 1. pip3 install --upgrade --user awscli
+RUN pip3 install --upgrade --user awscli
 
-# kubectl
-RUN if [ "$KUBECTL_VERSION" = "latest" ]; then \
-      KUBECTL_VERSION=$(curl -fsSL https://storage.googleapis.com/kubernetes-release/release/stable.txt); \
-    fi \
-    && curl -fsSL "https://storage.googleapis.com/kubernetes-release/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" \
-       -o /usr/local/bin/kubectl \
-    && chmod +x /usr/local/bin/kubectl
+# 2. kubectl (latest stable)
+RUN curl -LO "https://storage.googleapis.com/kubernetes-release/release/$(curl -s https://storage.googleapis.com/kubernetes-release/release/stable.txt)/bin/linux/amd64/kubectl" \
+    && chmod +x ./kubectl \
+    && mv ./kubectl /usr/local/bin/kubectl
 
-# eksctl
-RUN curl -fsSL "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_Linux_amd64.tar.gz" \
-    | tar xz -C /usr/local/bin
+# 3. eksctl (latest, using uname -s like the original)
+RUN curl --silent --fail --retry 5 --location \
+      "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" \
+      | tar xz -C /tmp \
+    && mv -v /tmp/eksctl /usr/local/bin \
+    && eksctl version
 
-# Helm
-RUN curl -fsSL "https://get.helm.sh/helm-v${HELM_VERSION}-linux-amd64.tar.gz" \
-    | tar xz -C /tmp \
-    && mv /tmp/linux-amd64/helm /usr/local/bin/helm \
-    && rm -rf /tmp/linux-amd64
+# 4. helm v3.16.4
+RUN curl --silent --fail --retry 5 --location \
+      "https://get.helm.sh/helm-v${HELM_VERSION}-linux-amd64.tar.gz" \
+      | tar xz -C /tmp \
+    && mv -v /tmp/linux-amd64/helm /usr/local/bin \
+    && rm -rf /tmp/linux-amd64 \
+    && helm version
 
-# Terraform
-RUN if [ "$TERRAFORM_VERSION" = "latest" ]; then \
-      TERRAFORM_VERSION=$(curl -fsSL https://api.github.com/repos/hashicorp/terraform/releases/latest \
-        | jq -r '.tag_name' | sed 's/v//'); \
-    fi \
-    && curl -fsSL "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_amd64.zip" \
-       -o /tmp/terraform.zip \
-    && unzip -q /tmp/terraform.zip -d /usr/local/bin \
+# 5. coder CLI
+RUN curl --silent --fail --retry 5 -L https://coder.com/install.sh \
+      | sh -s -- --version ${CODER_VERSION} --method standalone \
+    && coder --version
+
+# 6. terraform (latest)
+RUN TERRAFORM_VERSION=$(curl --silent --fail --retry 5 --location \
+      "https://api.github.com/repos/hashicorp/terraform/releases/latest" \
+      | grep tag_name | cut -d '"' -f 4 | sed 's/v//') \
+    && curl --silent --fail --retry 5 --location \
+      "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_amd64.zip" \
+      -o terraform.zip \
+    && unzip terraform.zip \
+    && mv terraform /usr/local/bin/ \
     && chmod +x /usr/local/bin/terraform \
-    && rm /tmp/terraform.zip
-
-# Coder CLI
-RUN curl -fsSL https://coder.com/install.sh | sh -s -- --version ${CODER_VERSION} --method standalone
-
-# Verify all installs
-RUN echo "=== Installed versions ===" \
-    && aws --version \
-    && kubectl version --client \
-    && eksctl version \
-    && helm version --short \
-    && terraform version \
-    && coder version \
-    && python3.12 --version \
-    && git --version
+    && rm terraform.zip \
+    && terraform version
 
 ENTRYPOINT ["/bin/bash", "-c"]
