@@ -28,13 +28,6 @@ Parameters:
     Description: S3 object key for the zipped source
     Default: "codebuild-image-source.zip"
 
-  ECRPublicAlias:
-    Type: String
-    Description: >
-      Your ECR Public registry alias. Find it at
-      https://console.aws.amazon.com/ecr/public-registry or via
-      aws ecr-public describe-registries --region us-east-1
-
 Resources:
 
   #####################################
@@ -52,6 +45,93 @@ Resources:
           - Linux
         Architectures:
           - x86-64
+
+  #####################################
+  # Lambda to discover ECR Public alias
+  #####################################
+  ECRAliasLookupRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ECRPublicDescribe
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecr-public:DescribeRegistries
+                Resource: "*"
+
+  ECRAliasLookupFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: PublicECRRepository
+    Properties:
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt ECRAliasLookupRole.Arn
+      Timeout: 30
+      Code:
+        ZipFile: |
+          import boto3
+          import json
+          import urllib.request
+          import logging
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          def handler(event, context):
+              logger.info(f"Event: {json.dumps(event)}")
+              response_data = {}
+
+              try:
+                  if event["RequestType"] == "Delete":
+                      send(event, context, "SUCCESS", {})
+                      return
+
+                  client = boto3.client("ecr-public", region_name="us-east-1")
+                  result = client.describe_registries()
+                  alias = result["registries"][0]["aliases"][0]["name"]
+                  logger.info(f"Discovered ECR Public alias: {alias}")
+                  send(event, context, "SUCCESS", {"Alias": alias})
+
+              except Exception as e:
+                  logger.error(f"Error: {e}")
+                  send(event, context, "FAILED", {"Reason": str(e)})
+
+          def send(event, context, status, data):
+              body = json.dumps({
+                  "Status": status,
+                  "Reason": data.get("Reason", "See CloudWatch"),
+                  "PhysicalResourceId": context.log_stream_name,
+                  "StackId": event["StackId"],
+                  "RequestId": event["RequestId"],
+                  "LogicalResourceId": event["LogicalResourceId"],
+                  "Data": data,
+              })
+              req = urllib.request.Request(
+                  url=event["ResponseURL"],
+                  data=body.encode("utf-8"),
+                  headers={"content-type": "", "content-length": str(len(body))},
+                  method="PUT",
+              )
+              with urllib.request.urlopen(req) as resp:
+                  logger.info(f"CFN response status: {resp.getcode()}")
+
+  ECRPublicAlias:
+    Type: Custom::ECRPublicAlias
+    DependsOn: PublicECRRepository
+    Properties:
+      ServiceToken: !GetAtt ECRAliasLookupFunction.Arn
 
   #####################################
   # IAM Role for Image Build
@@ -116,11 +196,10 @@ Resources:
         Type: LINUX_CONTAINER
         ComputeType: BUILD_GENERAL1_MEDIUM
         Image: aws/codebuild/amazonlinux2-x86_64-standard:5.0
-        PrivilegedMode: true  # Required for docker build
+        PrivilegedMode: true
         EnvironmentVariables:
           - Name: ECR_PUBLIC_ALIAS
-            Value: !Ref ECRPublicAlias
-            Type: PLAINTEXT
+            Value: !GetAtt ECRPublicAlias.Alias
           - Name: IMAGE_REPO_NAME
             Value: !Ref ECRPublicRepositoryName
           - Name: HELM_VERSION
@@ -141,7 +220,11 @@ Resources:
 Outputs:
   ECRPublicRepositoryUri:
     Description: Public ECR repository URI for the Coder CodeBuild image
-    Value: !Sub "public.ecr.aws/${ECRPublicAlias}/${ECRPublicRepositoryName}"
+    Value: !Sub "public.ecr.aws/${ECRPublicAlias.Alias}/${ECRPublicRepositoryName}"
+
+  ECRPublicAliasValue:
+    Description: Your auto-discovered ECR Public registry alias
+    Value: !GetAtt ECRPublicAlias.Alias
 
   ImageBuildProjectName:
     Description: CodeBuild project name for building the container image

@@ -37,25 +37,32 @@ docker build \
    aws s3 cp codebuild-image-source.zip s3://YOUR_BUCKET/codebuild-image-source.zip
    ```
 
-2. Deploy the CloudFormation stack:
+2. Deploy the CloudFormation stack (the ECR Public alias is auto-discovered — no need to know it upfront):
    ```bash
    aws cloudformation deploy \
      --template-file codebuild_image_pipeline.yaml \
      --stack-name coder-codebuild-image \
      --parameter-overrides \
        SourceBucket=YOUR_BUCKET \
-       ECRPublicAlias=YOUR_ALIAS \
      --capabilities CAPABILITY_NAMED_IAM
    ```
 
-3. Trigger the first build:
+3. Grab the image URI from the stack outputs:
+   ```bash
+   aws cloudformation describe-stacks \
+     --stack-name coder-codebuild-image \
+     --query 'Stacks[0].Outputs'
+   ```
+
+4. Trigger the first build:
    ```bash
    aws codebuild start-build --project-name coder-codebuild-image-builder
    ```
 
 ## Using the image in coder_deployment.yaml
 
-Replace the `Image` property in the BuildProject Environment:
+Replace the `Image` property in the BuildProject Environment with the
+`ECRPublicRepositoryUri` output value:
 
 ```yaml
 Image: public.ecr.aws/YOUR_ALIAS/coder-codebuild:latest
