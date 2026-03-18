@@ -1,0 +1,152 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  CodeBuild pipeline to build and push the Coder deployment container image
+  to a public ECR repository. The resulting image pre-bakes kubectl, eksctl,
+  helm, terraform, coder CLI, and AWS CLI so the main deployment build has
+  zero download dependencies in its pre_build phase.
+
+Parameters:
+  ECRPublicRepositoryName:
+    Type: String
+    Default: coder-codebuild
+    Description: Name of the public ECR repository
+
+  HelmVersion:
+    Type: String
+    Default: "3.16.4"
+
+  CoderVersion:
+    Type: String
+    Default: "2.30.2"
+
+  SourceBucket:
+    Type: String
+    Description: S3 bucket containing the zipped source (Dockerfile + buildspec)
+
+  SourceObjectKey:
+    Type: String
+    Description: S3 object key for the zipped source
+    Default: "codebuild-image-source.zip"
+
+  ECRPublicAlias:
+    Type: String
+    Description: >
+      Your ECR Public registry alias. Find it at
+      https://console.aws.amazon.com/ecr/public-registry or via
+      aws ecr-public describe-registries --region us-east-1
+
+Resources:
+
+  #####################################
+  # Public ECR Repository
+  #####################################
+  PublicECRRepository:
+    Type: AWS::ECR::PublicRepository
+    Properties:
+      RepositoryName: !Ref ECRPublicRepositoryName
+      RepositoryCatalogData:
+        AboutText: >
+          Pre-built container image for Coder EKS deployment CodeBuild jobs.
+          Includes kubectl, eksctl, helm, terraform, coder CLI, and AWS CLI.
+        OperatingSystems:
+          - Linux
+        Architectures:
+          - x86-64
+
+  #####################################
+  # IAM Role for Image Build
+  #####################################
+  ImageBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: coder-image-build-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ImageBuildPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "*"
+              - Sid: ECRPublicAuth
+                Effect: Allow
+                Action:
+                  - ecr-public:GetAuthorizationToken
+                  - sts:GetServiceBearerToken
+                Resource: "*"
+              - Sid: ECRPublicPush
+                Effect: Allow
+                Action:
+                  - ecr-public:BatchCheckLayerAvailability
+                  - ecr-public:InitiateLayerUpload
+                  - ecr-public:UploadLayerPart
+                  - ecr-public:CompleteLayerUpload
+                  - ecr-public:PutImage
+                Resource: !Sub "arn:aws:ecr-public::${AWS::AccountId}:repository/${ECRPublicRepositoryName}"
+              - Sid: S3Source
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                Resource: !Sub "arn:aws:s3:::${SourceBucket}/${SourceObjectKey}"
+
+  #####################################
+  # CodeBuild Project – Image Builder
+  #####################################
+  ImageBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: coder-codebuild-image-builder
+      Description: Builds the pre-baked container image for Coder deployment builds
+      ServiceRole: !GetAtt ImageBuildRole.Arn
+      Artifacts:
+        Type: NO_ARTIFACTS
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_MEDIUM
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:5.0
+        PrivilegedMode: true  # Required for docker build
+        EnvironmentVariables:
+          - Name: ECR_PUBLIC_ALIAS
+            Value: !Ref ECRPublicAlias
+            Type: PLAINTEXT
+          - Name: IMAGE_REPO_NAME
+            Value: !Ref ECRPublicRepositoryName
+          - Name: HELM_VERSION
+            Value: !Ref HelmVersion
+          - Name: CODER_VERSION
+            Value: !Ref CoderVersion
+      Source:
+        Type: S3
+        Location: !Sub "${SourceBucket}/${SourceObjectKey}"
+        BuildSpec: docker/buildspec_image.yaml
+      TimeoutInMinutes: 30
+      LogsConfig:
+        CloudWatchLogs:
+          Status: ENABLED
+          GroupName: /aws/codebuild/coder-image-builder
+          StreamName: build-log
+
+Outputs:
+  ECRPublicRepositoryUri:
+    Description: Public ECR repository URI for the Coder CodeBuild image
+    Value: !Sub "public.ecr.aws/${ECRPublicAlias}/${ECRPublicRepositoryName}"
+
+  ImageBuildProjectName:
+    Description: CodeBuild project name for building the container image
+    Value: !Ref ImageBuildProject
+
+  ECRPublicRepositoryArn:
+    Description: ARN of the public ECR repository
+    Value: !GetAtt PublicECRRepository.Arn
