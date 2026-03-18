@@ -31,25 +31,11 @@ Parameters:
 Resources:
 
   #####################################
-  # Public ECR Repository
+  # Lambda – Create ECR Public repo
+  # and discover the registry alias
+  # (works from any region)
   #####################################
-  PublicECRRepository:
-    Type: AWS::ECR::PublicRepository
-    Properties:
-      RepositoryName: !Ref ECRPublicRepositoryName
-      RepositoryCatalogData:
-        AboutText: >
-          Pre-built container image for Coder EKS deployment CodeBuild jobs.
-          Includes kubectl, eksctl, helm, terraform, coder CLI, and AWS CLI.
-        OperatingSystems:
-          - Linux
-        Architectures:
-          - x86-64
-
-  #####################################
-  # Lambda to discover ECR Public alias
-  #####################################
-  ECRAliasLookupRole:
+  ECRPublicRepoRole:
     Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
@@ -62,23 +48,25 @@ Resources:
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
       Policies:
-        - PolicyName: ECRPublicDescribe
+        - PolicyName: ECRPublicManage
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
               - Effect: Allow
                 Action:
+                  - ecr-public:CreateRepository
+                  - ecr-public:DeleteRepository
+                  - ecr-public:DescribeRepositories
                   - ecr-public:DescribeRegistries
                 Resource: "*"
 
-  ECRAliasLookupFunction:
+  ECRPublicRepoFunction:
     Type: AWS::Lambda::Function
-    DependsOn: PublicECRRepository
     Properties:
       Runtime: python3.12
       Handler: index.handler
-      Role: !GetAtt ECRAliasLookupRole.Arn
-      Timeout: 30
+      Role: !GetAtt ECRPublicRepoRole.Arn
+      Timeout: 60
       Code:
         ZipFile: |
           import boto3
@@ -89,30 +77,61 @@ Resources:
           logger = logging.getLogger()
           logger.setLevel(logging.INFO)
 
+          # ECR Public API lives exclusively in us-east-1
+          ecr = boto3.client("ecr-public", region_name="us-east-1")
+
           def handler(event, context):
               logger.info(f"Event: {json.dumps(event)}")
-              response_data = {}
+              repo_name = event["ResourceProperties"]["RepositoryName"]
 
               try:
                   if event["RequestType"] == "Delete":
-                      send(event, context, "SUCCESS", {})
+                      try:
+                          ecr.delete_repository(repositoryName=repo_name, force=True)
+                          logger.info(f"Deleted repo {repo_name}")
+                      except ecr.exceptions.RepositoryNotFoundException:
+                          logger.info("Repo already gone, nothing to delete")
+                      send(event, context, "SUCCESS", {}, repo_name)
                       return
 
-                  client = boto3.client("ecr-public", region_name="us-east-1")
-                  result = client.describe_registries()
-                  alias = result["registries"][0]["aliases"][0]["name"]
-                  logger.info(f"Discovered ECR Public alias: {alias}")
-                  send(event, context, "SUCCESS", {"Alias": alias})
+                  # Create or Update – ensure repo exists
+                  try:
+                      ecr.create_repository(
+                          repositoryName=repo_name,
+                          catalogData={
+                              "description": "Pre-built image for Coder EKS deployment CodeBuild jobs",
+                              "operatingSystems": ["Linux"],
+                              "architectures": ["x86-64"],
+                          },
+                      )
+                      logger.info(f"Created repo {repo_name}")
+                  except ecr.exceptions.RepositoryAlreadyExistsException:
+                      logger.info(f"Repo {repo_name} already exists")
+
+                  # Discover the registry alias
+                  registries = ecr.describe_registries()
+                  alias = registries["registries"][0]["aliases"][0]["name"]
+                  logger.info(f"ECR Public alias: {alias}")
+
+                  # Get the repo ARN
+                  repos = ecr.describe_repositories(repositoryNames=[repo_name])
+                  repo_arn = repos["repositories"][0]["repositoryArn"]
+
+                  send(event, context, "SUCCESS", {
+                      "Alias": alias,
+                      "RepositoryArn": repo_arn,
+                      "RepositoryUri": f"public.ecr.aws/{alias}/{repo_name}",
+                  }, repo_name)
 
               except Exception as e:
                   logger.error(f"Error: {e}")
-                  send(event, context, "FAILED", {"Reason": str(e)})
+                  send(event, context, "FAILED", {"Reason": str(e)}, repo_name)
 
-          def send(event, context, status, data):
+          def send(event, context, status, data, physical_id="none"):
               body = json.dumps({
                   "Status": status,
                   "Reason": data.get("Reason", "See CloudWatch"),
-                  "PhysicalResourceId": context.log_stream_name,
+                  "PhysicalResourceId": physical_id,
                   "StackId": event["StackId"],
                   "RequestId": event["RequestId"],
                   "LogicalResourceId": event["LogicalResourceId"],
@@ -125,13 +144,13 @@ Resources:
                   method="PUT",
               )
               with urllib.request.urlopen(req) as resp:
-                  logger.info(f"CFN response status: {resp.getcode()}")
+                  logger.info(f"CFN response: {resp.getcode()}")
 
-  ECRPublicAlias:
-    Type: Custom::ECRPublicAlias
-    DependsOn: PublicECRRepository
+  PublicECRRepository:
+    Type: Custom::ECRPublicRepository
     Properties:
-      ServiceToken: !GetAtt ECRAliasLookupFunction.Arn
+      ServiceToken: !GetAtt ECRPublicRepoFunction.Arn
+      RepositoryName: !Ref ECRPublicRepositoryName
 
   #####################################
   # IAM Role for Image Build
@@ -173,7 +192,7 @@ Resources:
                   - ecr-public:UploadLayerPart
                   - ecr-public:CompleteLayerUpload
                   - ecr-public:PutImage
-                Resource: !Sub "arn:aws:ecr-public::${AWS::AccountId}:repository/${ECRPublicRepositoryName}"
+                Resource: !GetAtt PublicECRRepository.RepositoryArn
               - Sid: S3Source
                 Effect: Allow
                 Action:
@@ -199,7 +218,7 @@ Resources:
         PrivilegedMode: true
         EnvironmentVariables:
           - Name: ECR_PUBLIC_ALIAS
-            Value: !GetAtt ECRPublicAlias.Alias
+            Value: !GetAtt PublicECRRepository.Alias
           - Name: IMAGE_REPO_NAME
             Value: !Ref ECRPublicRepositoryName
           - Name: HELM_VERSION
@@ -220,11 +239,11 @@ Resources:
 Outputs:
   ECRPublicRepositoryUri:
     Description: Public ECR repository URI for the Coder CodeBuild image
-    Value: !Sub "public.ecr.aws/${ECRPublicAlias.Alias}/${ECRPublicRepositoryName}"
+    Value: !GetAtt PublicECRRepository.RepositoryUri
 
   ECRPublicAliasValue:
-    Description: Your auto-discovered ECR Public registry alias
-    Value: !GetAtt ECRPublicAlias.Alias
+    Description: Your ECR Public registry alias
+    Value: !GetAtt PublicECRRepository.Alias
 
   ImageBuildProjectName:
     Description: CodeBuild project name for building the container image
@@ -232,4 +251,4 @@ Outputs:
 
   ECRPublicRepositoryArn:
     Description: ARN of the public ECR repository
-    Value: !GetAtt PublicECRRepository.Arn
+    Value: !GetAtt PublicECRRepository.RepositoryArn
