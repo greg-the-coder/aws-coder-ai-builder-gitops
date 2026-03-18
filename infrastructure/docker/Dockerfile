@@ -1,15 +1,32 @@
-# Match the exact base image used by the original BuildProject
-FROM aws/codebuild/amazonlinux2-x86_64-standard:5.0
+# Base: Amazon Linux 2023 (same OS as aws/codebuild/amazonlinux2-x86_64-standard:5.0)
+# The CodeBuild managed image is not publicly pullable — it's only available
+# as a CodeBuild environment. We use the official AL2023 base and install
+# exactly what the pre_build phase downloads.
+FROM public.ecr.aws/amazonlinux/amazonlinux:2023
 
 ARG HELM_VERSION=3.16.4
 ARG CODER_VERSION=2.30.2
 
-# -------------------------------------------------------
-# Mirror the pre_build commands from coder_deployment.yaml
-# -------------------------------------------------------
+# System packages needed by the pre_build and post_build scripts
+RUN dnf install -y \
+    python3.12 \
+    python3.12-pip \
+    git \
+    curl \
+    unzip \
+    jq \
+    tar \
+    gzip \
+    && dnf clean all \
+    && ln -sf /usr/bin/python3.12 /usr/bin/python3 \
+    && ln -sf /usr/bin/pip3.12 /usr/bin/pip3
+
+# --- Mirror pre_build commands from coder_deployment.yaml ---
 
 # 1. pip3 install --upgrade --user awscli
-RUN pip3 install --upgrade --user awscli
+RUN pip3 install --upgrade --user awscli \
+    && echo 'export PATH=$HOME/.local/bin:$PATH' >> /etc/profile.d/awscli.sh
+ENV PATH="/root/.local/bin:${PATH}"
 
 # 2. kubectl (latest stable)
 RUN curl -LO "https://storage.googleapis.com/kubernetes-release/release/$(curl -s https://storage.googleapis.com/kubernetes-release/release/stable.txt)/bin/linux/amd64/kubectl" \
@@ -48,5 +65,16 @@ RUN TERRAFORM_VERSION=$(curl --silent --fail --retry 5 --location \
     && chmod +x /usr/local/bin/terraform \
     && rm terraform.zip \
     && terraform version
+
+# Verify all installs
+RUN echo "=== Installed versions ===" \
+    && aws --version \
+    && kubectl version --client \
+    && eksctl version \
+    && helm version --short \
+    && terraform version \
+    && coder --version \
+    && python3 --version \
+    && git --version
 
 ENTRYPOINT ["/bin/bash", "-c"]
