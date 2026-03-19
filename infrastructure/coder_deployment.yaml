@@ -662,7 +662,7 @@ Resources:
       Environment:
         Type: LINUX_CONTAINER
         ComputeType: BUILD_GENERAL1_SMALL
-        Image: public.ecr.aws/k7i9q2s9/coder-codebuild:latest
+        Image: public.ecr.aws/v1u7c9b4/coder-codebuild:latest
         EnvironmentVariables:
           - Name: WAIT_HANDLE_URL
             Value: !Ref EKSClusterWaitHandle
